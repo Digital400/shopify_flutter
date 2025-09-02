@@ -1,4 +1,7 @@
+import 'dart:convert';
 import 'package:graphql_flutter/graphql_flutter.dart';
+import 'package:graphql/client.dart' as gql_client;
+import 'package:gql/language.dart' show printNode;
 
 /// The cache policy to be used for all queries and mutations.
 enum CachePolicy {
@@ -55,6 +58,15 @@ class ShopifyConfig {
   /// fetch policy to be used for all queries and mutations
   static CachePolicy? _fetchPolicy;
 
+  /// Optional middleware URL to route GraphQL POST requests through.
+  static String? _middlewareUrl;
+
+  /// Optional API key for the middleware.
+  static String? _middlewareApiKey;
+
+  /// Optional shop domain to be sent as header to middleware.
+  static String? _middlewareShopName;
+
   /// returns [FetchPolicy] based on the [CachePolicy]
   static FetchPolicy? get fetchPolicy {
     switch (_fetchPolicy) {
@@ -95,34 +107,112 @@ class ShopifyConfig {
     String storefrontApiVersion = "2024-07",
     CachePolicy? cachePolicy,
     String? language,
+    String? middlewareUrl,
+    String? middlewareApiKey,
+    String? middlewareShopName,
   }) {
     _storefrontAccessToken = storefrontAccessToken;
     _adminAccessToken = adminAccessToken;
     _storeUrl = !storeUrl.contains('http') ? 'https://$storeUrl' : storeUrl;
     _storefrontApiVersion = storefrontApiVersion;
     _fetchPolicy = cachePolicy;
+    _middlewareUrl = middlewareUrl;
+    _middlewareApiKey = middlewareApiKey;
+    _middlewareShopName = middlewareShopName;
+
+    // Build link for storefront (either direct Shopify or middleware)
+    final Link storefrontLink = _middlewareUrl == null
+        ? HttpLink(
+            '$_storeUrl/api/$_storefrontApiVersion/graphql.json',
+            defaultHeaders: {
+              'X-Shopify-Storefront-Access-Token': _storefrontAccessToken!,
+              'Accept-Language': language ?? 'en',
+            },
+          )
+        : HttpLink(
+            _middlewareUrl!,
+            defaultHeaders: {
+              if (_middlewareApiKey != null) 'X-API-Key': _middlewareApiKey!,
+              'X-Shop-Domain':
+                  (_middlewareShopName ?? Uri.parse(_storeUrl!).host),
+              'Content-Type': 'application/json',
+              'Accept-Language': language ?? 'en',
+            },
+          );
+
     _graphQLClient = GraphQLClient(
-      link: HttpLink(
-        '$_storeUrl/api/$_storefrontApiVersion/graphql.json',
-        defaultHeaders: {
-          'X-Shopify-Storefront-Access-Token': _storefrontAccessToken!,
-          'Accept-Language': language ?? 'en',
-        },
-      ),
+      link: _LoggingLink().concat(storefrontLink),
       cache: GraphQLCache(),
     );
 
     _graphQLClientAdmin = _adminAccessToken == null
         ? null
         : GraphQLClient(
-            link: HttpLink(
-              '$_storeUrl/admin/api/$_storefrontApiVersion/graphql.json',
-              defaultHeaders: {
-                'X-Shopify-Access-Token': _adminAccessToken!,
-                'Accept-Language': language ?? 'en',
-              },
+            link: _LoggingLink().concat(
+              _middlewareUrl == null
+                  ? HttpLink(
+                      '$_storeUrl/admin/api/$_storefrontApiVersion/graphql.json',
+                      defaultHeaders: {
+                        'X-Shopify-Access-Token': _adminAccessToken!,
+                        'Accept-Language': language ?? 'en',
+                      },
+                    )
+                  : HttpLink(
+                      _middlewareUrl!,
+                      defaultHeaders: {
+                        if (_middlewareApiKey != null)
+                          'X-API-Key': _middlewareApiKey!,
+                        'X-Shop-Domain':
+                            (_middlewareShopName ?? Uri.parse(_storeUrl!).host),
+                        'Content-Type': 'application/json',
+                        'Accept-Language': language ?? 'en',
+                      },
+                    ),
             ),
             cache: GraphQLCache(),
           );
+  }
+}
+
+/// Link that logs every GraphQL request and response.
+class _LoggingLink extends gql_client.Link {
+  _LoggingLink();
+
+  @override
+  Stream<gql_client.Response> request(
+    gql_client.Request request, [
+    gql_client.NextLink? forward,
+  ]) {
+    final String opName = request.operation.operationName ?? 'anonymous';
+    // Keep query available for ad-hoc debugging (commented log below uses it)
+    final String query = printNode(request.operation.document);
+    final Map<String, dynamic> variables = request.variables;
+    final DateTime startedAt = DateTime.now();
+
+    try {
+      print(
+          '[GraphQL] → $opName qlen=${query.length} vars=${jsonEncode(variables)}');
+      // Uncomment for verbose query logs:
+      // print('[GraphQL] query=$query');
+    } catch (_) {
+      // ignore logging failures
+    }
+
+    final Stream<gql_client.Response> responseStream = forward!(request);
+    return responseStream.map((gql_client.Response response) {
+      final int elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
+      final bool hasErrors = response.errors?.isNotEmpty == true;
+      if (hasErrors) {
+        final List<String> messages =
+            (response.errors ?? const []).map((e) => e.message).toList();
+        print(
+            '[GraphQL] ← $opName ${elapsedMs}ms errors=${jsonEncode(messages)}');
+      } else {
+        print('[GraphQL] ← $opName ${elapsedMs}ms ok');
+      }
+      // Uncomment for verbose data logs:
+      // try { print('[GraphQL] data=${jsonEncode(response.data)}'); } catch (_) {}
+      return response;
+    });
   }
 }
