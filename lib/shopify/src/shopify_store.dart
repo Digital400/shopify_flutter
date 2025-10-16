@@ -8,6 +8,7 @@ import 'package:shopify_flutter/graphql_operations/storefront/queries/get_collec
 import 'package:shopify_flutter/graphql_operations/storefront/queries/get_product_by_handle.dart';
 import 'package:shopify_flutter/graphql_operations/storefront/queries/get_product_recommendations.dart';
 import 'package:shopify_flutter/graphql_operations/storefront/queries/get_products_by_ids.dart';
+import 'package:shopify_flutter/graphql_operations/storefront/queries/get_product_by_sku.dart';
 import 'package:shopify_flutter/graphql_operations/storefront/queries/get_shop.dart';
 import 'package:shopify_flutter/graphql_operations/storefront/queries/get_x_collections_and_n_products_sorted.dart';
 import 'package:shopify_flutter/graphql_operations/storefront/queries/get_x_products_after_cursor.dart';
@@ -144,6 +145,64 @@ class ShopifyStore with ShopifyError {
         return node != null ? {'node': node} : null;
       }).where((edge) => edge != null).toList()
     };
+    productList = Products.fromGraphJson(newResponse).productList;
+    return productList;
+  }
+
+  /// Returns a List of [Product].
+  ///
+  /// Returns the Product associated to the given [sku]
+  Future<List<Product>?> getProductBySku(
+    String sku, {
+    List<MetafieldIdentifier>? metafields,
+  }) async {
+    List<Product>? productList = [];
+    final QueryOptions _options = WatchQueryOptions(
+      document: gql(getProductBySkuQuery),
+      variables: {
+        'sku': sku,
+        'country': ShopifyLocalization.countryCode,
+        'metafields': metafields != null
+            ? metafields.map((e) => e.toJson()).toList()
+            : [],
+      },
+      fetchPolicy: ShopifyConfig.fetchPolicy,
+    );
+    final QueryResult result = await _graphQLClient!.query(_options);
+    checkForError(result);
+    var response = result.data!;
+
+    // Transform the productVariants response to match the expected Products structure
+    var newResponse = {
+      'edges': response['productVariants']['edges']
+          .map<Map<String, dynamic>>((edge) {
+        var variant = edge['node'];
+        var product = variant['product'];
+        return {
+          'node': {
+            ...product,
+            'variants': {
+              'edges': [
+                {
+                  'node': {
+                    'id': variant['id'],
+                    'sku': variant['sku'],
+                    'title': variant['title'],
+                    'availableForSale': variant['availableForSale'],
+                    'quantityAvailable': variant['quantityAvailable'],
+                    'priceV2': variant['priceV2'],
+                    'compareAtPriceV2': variant['compareAtPriceV2'],
+                    'image': variant['image'],
+                    'selectedOptions': variant['selectedOptions'],
+                  }
+                }
+              ]
+            }
+          }
+        };
+      }).toList()
+    };
+
     productList = Products.fromGraphJson(newResponse).productList;
     return productList;
   }
